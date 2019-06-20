@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	"log"
@@ -21,14 +22,12 @@ import (
 const defaultSyncPeriod = 30 * time.Second
 
 type Controller struct {
-	indexer       cache.Indexer
-	queue         workqueue.RateLimitingInterface
-	informer      cache.Controller
-	clientset     *kubernetes.Clientset
-	eventInformer coreInformers.EventInformer
-	eventLister corelisters.EventLister
+	queue             workqueue.RateLimitingInterface
+	clientset         *kubernetes.Clientset
+	eventInformer     coreInformers.EventInformer
+	eventLister       corelisters.EventLister
+	eventListerSynced cache.InformerSynced
 }
-
 
 func New(clientset *kubernetes.Clientset) *Controller {
 	sharedInformerFactory := informers.NewSharedInformerFactory(clientset, defaultSyncPeriod)
@@ -65,7 +64,10 @@ func New(clientset *kubernetes.Clientset) *Controller {
 		defaultSyncPeriod,
 	)
 
+	s.queue = workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "event")
+
 	s.eventLister = eventInformer.Lister()
+	s.eventListerSynced = eventInformer.Informer().HasSynced
 
 	return s
 }
@@ -92,19 +94,20 @@ func (c *Controller) processNextItem() bool {
 // information about the pod to stdout. In case an error happened, it has to simply return the error.
 // The retry logic should not be part of the business logic.
 func (c *Controller) syncToStdout(key string) error {
-	obj, exists, err := c.indexer.GetByKey(key)
+	ns, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
-		log.Println(err)
 		return err
 	}
 
-	if !exists {
-		// Below we will warm up our cache with a Pod, so that we will see a delete for one pod
-		fmt.Printf("Event %s does not exist anymore\n", key)
-	} else {
-		// Note that you also have to check the uid if you have a local controlled resource, which
-		// is dependent on the actual instance, to detect that a Pod was recreated with the same name
-		c.handleEvent(obj.(*v1.Event))
+	event, err := c.eventLister.Events(ns).Get(name)
+
+	switch {
+	case errors.IsNotFound(err):
+
+	case err != nil:
+		fmt.Printf("error %v", err)
+	default:
+		c.handleEvent(event)
 	}
 	return nil
 }
@@ -171,10 +174,10 @@ func (c *Controller) Run(threadiness int, stopCh chan struct{}) {
 	defer c.queue.ShutDown()
 	log.Println("Starting Event controller")
 
-	go c.informer.Run(stopCh)
+	go c.eventInformer.Informer().Run(stopCh)
 
 	// Wait for all involved caches to be synced, before processing items from the queue is started
-	if !cache.WaitForCacheSync(stopCh, c.informer.HasSynced) {
+	if !cache.WaitForCacheSync(stopCh, c.eventListerSynced) {
 		runtime.HandleError(fmt.Errorf("Timed out waiting for caches to sync"))
 		return
 	}
