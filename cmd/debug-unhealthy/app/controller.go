@@ -64,6 +64,7 @@ func New(clientset *kubernetes.Clientset) *Controller {
 		defaultSyncPeriod,
 	)
 
+	// create queue
 	s.queue = workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "event")
 
 	s.eventLister = eventInformer.Lister()
