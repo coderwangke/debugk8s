@@ -4,7 +4,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/imroc/debugk8s/cmd/debug-unhealthy/app"
+	"github.com/coderwangke/debugk8s/cmd/debug-unhealthy/app"
 )
 
 func main() {

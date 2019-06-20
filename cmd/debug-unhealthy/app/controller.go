@@ -2,33 +2,72 @@ package app
 
 import (
 	"fmt"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/informers"
 	"log"
 	"time"
 
-	ping "github.com/sparrc/go-ping"
-	v1 "k8s.io/api/core/v1"
+	"github.com/sparrc/go-ping"
+	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/apimachinery/pkg/util/wait"
+	coreInformers "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes"
+	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 )
 
+const defaultSyncPeriod = 30 * time.Second
+
 type Controller struct {
-	indexer   cache.Indexer
-	queue     workqueue.RateLimitingInterface
-	informer  cache.Controller
-	clientset *kubernetes.Clientset
+	indexer       cache.Indexer
+	queue         workqueue.RateLimitingInterface
+	informer      cache.Controller
+	clientset     *kubernetes.Clientset
+	eventInformer coreInformers.EventInformer
+	eventLister corelisters.EventLister
 }
 
-func NewController(queue workqueue.RateLimitingInterface, indexer cache.Indexer, informer cache.Controller, clientset *kubernetes.Clientset) *Controller {
-	return &Controller{
-		informer:  informer,
-		indexer:   indexer,
-		queue:     queue,
-		clientset: clientset,
+
+func New(clientset *kubernetes.Clientset) *Controller {
+	sharedInformerFactory := informers.NewSharedInformerFactory(clientset, defaultSyncPeriod)
+	eventInformer := sharedInformerFactory.Core().V1().Events()
+
+	s := &Controller{
+		clientset:     clientset,
+		eventInformer: eventInformer,
 	}
+
+	eventInformer.Informer().AddEventHandlerWithResyncPeriod(
+		cache.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				key, err := cache.MetaNamespaceKeyFunc(obj)
+				if err == nil {
+					s.queue.Add(key)
+				}
+			},
+			UpdateFunc: func(old interface{}, new interface{}) {
+				key, err := cache.MetaNamespaceKeyFunc(new)
+				if err == nil {
+					s.queue.Add(key)
+				}
+			},
+			DeleteFunc: func(obj interface{}) {
+				// IndexerInformer uses a delta queue, therefore for deletes we have to use this
+				// key function.
+				key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
+				if err == nil {
+					s.queue.Add(key)
+				}
+			},
+		},
+		defaultSyncPeriod,
+	)
+
+	s.eventLister = eventInformer.Lister()
+
+	return s
 }
 
 func (c *Controller) processNextItem() bool {
